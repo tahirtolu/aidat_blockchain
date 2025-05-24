@@ -517,11 +517,31 @@ def main():
                 if tx_response.status_code == 200:
                     transactions = tx_response.json()
                     if transactions:
+                        # Tüm aidatları çek
+                        dues_response = requests.get(
+                            f"{API_URL}/dues/",
+                            headers={"Authorization": f"Bearer {st.session_state.token}"}
+                        )
+                        dues_dict = {}
+                        if dues_response.status_code == 200:
+                            dues = dues_response.json()
+                            dues_dict = {due['id']: due for due in dues}
+                        
                         for tx in transactions:
                             st.write(f"Tarih: {tx['created_at']}")
                             st.write(f"İşlem Türü: {tx['transaction_type']}")
                             st.write(f"Tutar: {tx['amount']} TL")
-                            st.write(f"Açıklama: {tx['description']}")
+                            
+                            # Aidat bilgilerini göster
+                            if 'due_id' in tx and tx['due_id'] in dues_dict:
+                                due = dues_dict[tx['due_id']]
+                                st.write(f"Aidat: {due['description']}")
+                                st.write(f"Son Ödeme Tarihi: {due['due_date']}")
+                            
+                            # Description alanı varsa göster
+                            if 'description' in tx and tx['description']:
+                                st.write(f"Açıklama: {tx['description']}")
+                            
                             st.markdown('---')
                     else:
                         st.info("Henüz işlem geçmişiniz yok.")
