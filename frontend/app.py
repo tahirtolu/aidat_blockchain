@@ -270,81 +270,112 @@ def main():
                     st.subheader("Genel İstatistikler")
                     col1, col2, col3 = st.columns(3)
                     
+                    # Tüm aidatları çek
+                    dues_response = requests.get(
+                        f"{API_URL}/dues/",
+                        headers={"Authorization": f"Bearer {st.session_state.token}"}
+                    )
+                    
+                    if dues_response.status_code != 200:
+                        st.error("Aidatlar yüklenemedi!")
+                        return
+                        
+                    dues = dues_response.json()
+                    
                     total_dues = 0
-                    total_paid = 0
                     total_amount = 0
-                    monthly_stats = {}
+                    total_tam_odeme = 0
+                    total_kismi_odeme = 0
+                    total_users = len(normal_users)
                     
-                    for user in normal_users:
-                        dues_response = requests.get(
-                            f"{API_URL}/dues/?owner_id={user['id']}",
-                            headers={"Authorization": f"Bearer {st.session_state.token}"}
-                        )
-                        if dues_response.status_code == 200:
-                            dues = dues_response.json()
-                            for due in dues:
-                                total_dues += 1
-                                total_amount += due['amount']
-                                if due['is_paid']:
-                                    total_paid += 1
-                                
-                                # Aylık istatistikler için
-                                due_date = datetime.fromisoformat(due['due_date'].replace('Z', '+00:00'))
-                                month_key = due_date.strftime('%Y-%m')
-                                if month_key not in monthly_stats:
-                                    monthly_stats[month_key] = {'total': 0, 'paid': 0, 'count': 0}
-                                monthly_stats[month_key]['total'] += due['amount']
-                                monthly_stats[month_key]['count'] += 1
-                                if due['is_paid']:
-                                    monthly_stats[month_key]['paid'] += 1
-                    
-                    with col1:
-                        st.metric("Toplam Kullanıcı", len(normal_users))
-                    with col2:
-                        st.metric("Toplam Aidat Tutarı", f"{total_amount:.2f} TL")
-                    with col3:
-                        payment_rate = (total_paid / total_dues * 100) if total_dues > 0 else 0
-                        st.metric("Ödeme Oranı", f"%{payment_rate:.1f}")
-                    
-                    # Aylık İstatistikler
-                    st.subheader("Aylık İstatistikler")
-                    # Her aidat için ayrı satırda detaylı tablo
-                    detailed_rows = []
-                    for due in requests.get(f"{API_URL}/dues/", headers={"Authorization": f"Bearer {st.session_state.token}"}).json():
-                        due_date = pd.to_datetime(due['due_date'])
-                        ay = due_date.strftime('%Y-%m')
-                        # Ödenen kişi sayısı ve toplam ödenen miktar
+                    for due in dues:
+                        total_dues += 1
+                        total_amount += due['amount']
+                        
+                        # Bu aidata ait tüm ödemeleri al
                         tx_response = requests.get(
                             f"{API_URL}/transactions/?due_id={due['id']}",
                             headers={"Authorization": f"Bearer {st.session_state.token}"}
                         )
-                        paid_users = set()
-                        total_paid_amount = 0.0
+                        
                         if tx_response.status_code == 200:
                             transactions = tx_response.json()
-                            for tx in transactions:
-                                paid_users.add(tx['user_id'])
-                                total_paid_amount += tx.get('amount', 0)
-                        toplam_kisi = len([u for u in users if not u.get('is_admin', False)])
-                        kisi_bazli_odeme_orani = (len(paid_users) / toplam_kisi * 100) if toplam_kisi > 0 else 0
-                        tutar_bazli_odeme_orani = (total_paid_amount / due['amount'] * 100) if due['amount'] > 0 else 0
-                        kalan_miktar = max(due['amount'] - total_paid_amount, 0)
-                        detailed_rows.append({
-                            'Ay': ay,
-                            'Açıklama': due['description'],
-                            'Tutar': due['amount'],
-                            'Son Ödeme Tarihi': due['due_date'],
-                            'Ödenen Kişi Sayısı': len(paid_users),
-                            'Toplam Kişi': toplam_kisi,
-                            'Toplam Ödenen': f"{total_paid_amount:.2f} TL",
-                            'Kalan Miktar': f"{kalan_miktar:.2f} TL",
-                            'Kişi Bazlı Oran': f"%{kisi_bazli_odeme_orani:.1f}",
-                            'Tutar Bazlı Oran': f"%{tutar_bazli_odeme_orani:.1f}"
-                        })
-                    if detailed_rows:
-                        st.dataframe(pd.DataFrame(detailed_rows), use_container_width=True)
-                    else:
-                        st.info("Henüz aidat kaydı yok.")
+                            
+                            # Her kullanıcı için ödeme kontrolü
+                            for user in normal_users:
+                                user_paid = sum(
+                                    tx.get('amount', 0) 
+                                    for tx in transactions 
+                                    if tx.get('user_id') == user['id']
+                                )
+                                
+                                if user_paid >= due['amount']:
+                                    total_tam_odeme += 1
+                                elif user_paid > 0:
+                                    total_kismi_odeme += 1
+                    
+                    with col1:
+                        st.metric("Toplam Kullanıcı", total_users)
+                    with col2:
+                        st.metric("Toplam Aidat Tutarı", f"{total_amount:.2f} TL")
+                    with col3:
+                        tam_odeme_orani = (total_tam_odeme / (total_users * total_dues) * 100) if total_users * total_dues > 0 else 0
+                        st.metric("Tam Ödeme Oranı", f"%{tam_odeme_orani:.1f}")
+                    
+                    # Detaylı ödeme istatistikleri
+                    st.write("---")
+                    st.write("Detaylı Ödeme İstatistikleri:")
+                    st.write(f"Toplam Tam Ödeme: {total_tam_odeme}")
+                    st.write(f"Toplam Kısmi Ödeme: {total_kismi_odeme}")
+                    st.write(f"Toplam Ödeme Yapılmayan: {(total_users * total_dues) - total_tam_odeme - total_kismi_odeme}")
+                    
+                    # Aylık İstatistikler
+                    st.subheader("Aylık İstatistikler")
+                    # Her aidat için ödeme istatistiklerini hesapla
+                    for due in dues:
+                        # Bu aidata ait tüm ödemeleri al
+                        tx_response = requests.get(
+                            f"{API_URL}/transactions/?due_id={due['id']}",
+                            headers={"Authorization": f"Bearer {st.session_state.token}"}
+                        )
+                        
+                        if tx_response.status_code == 200:
+                            transactions = tx_response.json()
+                            
+                            # Her kullanıcı için ayrı ayrı ödeme kontrolü
+                            tam_odeme_yapan_kisi = 0
+                            kismi_odeme_yapan_kisi = 0
+                            toplam_kisi = 0
+                            
+                            for user in users:
+                                if user.get('is_admin', False):
+                                    continue
+                                    
+                                toplam_kisi += 1
+                                # Bu kullanıcının bu aidata yaptığı ödemeleri topla
+                                user_paid = sum(
+                                    tx.get('amount', 0) 
+                                    for tx in transactions 
+                                    if tx.get('user_id') == user['id']
+                                )
+                                
+                                # Ödeme durumunu kontrol et
+                                if user_paid >= due['amount']:
+                                    tam_odeme_yapan_kisi += 1
+                                elif user_paid > 0:
+                                    kismi_odeme_yapan_kisi += 1
+                            
+                            # Ödeme oranlarını hesapla
+                            tam_odeme_orani = (tam_odeme_yapan_kisi / toplam_kisi * 100) if toplam_kisi > 0 else 0
+                            kismi_odeme_orani = (kismi_odeme_yapan_kisi / toplam_kisi * 100) if toplam_kisi > 0 else 0
+                            
+                            # İstatistikleri göster
+                            st.write(f"Aidat: {due['description']}")
+                            st.write(f"Toplam Kişi: {toplam_kisi}")
+                            st.write(f"Tam Ödeme Yapan: {tam_odeme_yapan_kisi} (%{tam_odeme_orani:.1f})")
+                            st.write(f"Kısmi Ödeme Yapan: {kismi_odeme_yapan_kisi} (%{kismi_odeme_orani:.1f})")
+                            st.write(f"Hiç Ödeme Yapmayan: {toplam_kisi - tam_odeme_yapan_kisi - kismi_odeme_yapan_kisi}")
+                            st.markdown('---')
                     
                     # Kullanıcı Bazlı Detaylı Liste
                     st.subheader("Kullanıcı Bazlı Aidat Listesi")
@@ -357,18 +388,36 @@ def main():
                             if dues_response.status_code == 200:
                                 dues = dues_response.json()
                                 if dues:
-                                    user_total = sum(due['amount'] for due in dues)
-                                    user_paid = sum(1 for due in dues if due['is_paid'])
-                                    user_payment_rate = (user_paid / len(dues) * 100) if dues else 0
-                                    
-                                    st.write(f"Toplam Aidat: {user_total:.2f} TL")
-                                    st.write(f"Ödeme Oranı: %{user_payment_rate:.1f}")
-                                    
                                     for due in dues:
                                         st.write(f"Açıklama: {due['description']}")
                                         st.write(f"Tutar: {due['amount']} TL")
                                         st.write(f"Son Tarih: {due['due_date']}")
-                                        st.write(f"Durum: {'✅ Ödendi' if due['is_paid'] else '❌ Ödenmedi'}")
+                                        
+                                        # Kullanıcının bu aidata yaptığı ödemeleri al
+                                        tx_response = requests.get(
+                                            f"{API_URL}/transactions/?user_id={user['id']}&due_id={due['id']}",
+                                            headers={"Authorization": f"Bearer {st.session_state.token}"}
+                                        )
+                                        
+                                        total_paid = 0.0
+                                        if tx_response.status_code == 200:
+                                            transactions = tx_response.json()
+                                            total_paid = sum(tx.get('amount', 0) for tx in transactions)
+                                        
+                                        kalan = round(due['amount'] - total_paid, 2)
+                                        kalan = max(kalan, 0)
+                                        
+                                        # Ödeme durumunu belirle
+                                        if kalan == 0:
+                                            odeme_durumu = "✅ Ödendi"
+                                        elif kalan < due['amount']:
+                                            odeme_durumu = f"🟡 Kısmi Ödeme (%{(total_paid/due['amount']*100):.1f})"
+                                        else:
+                                            odeme_durumu = "❌ Ödenmedi"
+                                        
+                                        st.write(f"Durum: {odeme_durumu}")
+                                        st.write(f"Ödenen: {total_paid} TL")
+                                        st.write(f"Kalan: {kalan} TL")
                                         st.markdown('---')
                                 else:
                                     st.info("Bu kullanıcıya ait aidat yok.")
@@ -398,21 +447,38 @@ def main():
                             st.subheader(f"Açıklama: {due['description']}")
                             st.write(f"Tutar: {due['amount']} TL")
                             st.write(f"Son Tarih: {due['due_date']}")
-                            # Sadece bu kullanıcıya ait ödemeleri çek
+                            # Kullanıcının ödemelerini al
                             tx_response = requests.get(
-                                f"{API_URL}/transactions/?due_id={due['id']}",
+                                f"{API_URL}/transactions/?user_id={st.session_state.user['id']}&due_id={due['id']}",
                                 headers={"Authorization": f"Bearer {st.session_state.token}"}
                             )
+                            
                             total_paid = 0.0
                             if tx_response.status_code == 200:
                                 transactions = tx_response.json()
-                                total_paid = sum(tx.get('amount', 0) for tx in transactions)
+                                # Sadece bu kullanıcının ödemelerini topla
+                                total_paid = sum(tx.get('amount', 0) for tx in transactions if tx.get('user_id') == st.session_state.user['id'])
+                            
                             kalan = round(due['amount'] - total_paid, 2)
-                            kalan = max(kalan, 0)
-                            if kalan <= 0:
-                                st.success("Ödendi")
+                            kalan = max(kalan, 0)  # Negatif değer olmamasını sağla
+                            
+                            # Ödeme durumunu belirle
+                            if kalan == 0:
+                                odeme_durumu = "Ödendi"
+                                odeme_renk = "green"
+                            elif kalan < due['amount']:
+                                odeme_durumu = "Kısmi Ödeme"
+                                odeme_renk = "orange"
                             else:
-                                st.info(f"Kalan Tutar: {kalan} TL")
+                                odeme_durumu = "Ödenmedi"
+                                odeme_renk = "red"
+                            
+                            st.write(f"Ödeme Durumu: {odeme_durumu}")
+                            st.write(f"Kalan Tutar: {kalan} TL")
+                            st.write(f"Ödeme Tutarı: {total_paid} TL")
+                            
+                            # Eğer kalan tutar varsa ödeme formunu göster
+                            if kalan > 0:
                                 pay_amount = st.number_input(
                                     f"Ödeme Tutarı (max: {kalan} TL)",
                                     min_value=0.01,
@@ -421,16 +487,20 @@ def main():
                                     key=f"pay_amount_{due['id']}"
                                 )
                                 if st.button(f"Öde", key=f"pay_{due['id']}"):
-                                    pay_response = requests.post(
-                                        f"{API_URL}/dues/{due['id']}/pay",
-                                        headers={"Authorization": f"Bearer {st.session_state.token}"},
-                                        json={"amount": pay_amount, "description": due['description']}
-                                    )
-                                    if pay_response.status_code == 200:
-                                        st.success("Ödeme başarıyla gerçekleştirildi!")
-                                        st.experimental_rerun()
-                                    else:
-                                        st.error(f"Ödeme başarısız! Hata: {pay_response.text}")
+                                    try:
+                                        pay_response = requests.post(
+                                            f"{API_URL}/dues/{due['id']}/pay",
+                                            headers={"Authorization": f"Bearer {st.session_state.token}"},
+                                            json={"amount": pay_amount, "description": due['description']}
+                                        )
+                                        if pay_response.status_code == 200:
+                                            st.success("Ödeme başarıyla gerçekleştirildi!")
+                                            st.experimental_rerun()
+                                        else:
+                                            st.error(f"Ödeme başarısız! Hata: {pay_response.text}")
+                                    except Exception as e:
+                                        st.error(f"Ödeme sırasında bir hata oluştu: {str(e)}")
+                            
                             st.markdown('---')
                     else:
                         st.info("Ödemeniz gereken aidat bulunmamaktadır.")
