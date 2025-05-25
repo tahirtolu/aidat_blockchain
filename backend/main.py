@@ -14,7 +14,6 @@ from blockchain_manager import BlockchainManager
 from datetime import timedelta, datetime
 import logging
 import uuid
-from blockchain import blockchain
 import time
 import json
 from models import Block as DBBlock
@@ -28,18 +27,11 @@ logger = logging.getLogger(__name__)
 Base.metadata.create_all(bind=engine)
 
 # Genesis bloğu veritabanına kaydet
-db = SessionLocal()
-if db.query(DBBlock).count() == 0:
-    genesis = blockchain.chain[0]
-    db_block = DBBlock(
-        timestamp=datetime.fromtimestamp(genesis.timestamp),
-        previous_hash=genesis.previous_hash,
-        hash=genesis.hash,
-        data=json.dumps(genesis.transactions),
-    )
-    db.add(db_block)
-    db.commit()
-db.close()
+with SessionLocal() as db:
+    blockchain_manager = BlockchainManager(db)
+    if db.query(DBBlock).count() == 0:
+        # Genesis blok yoksa oluştur
+        blockchain_manager.create_block([])
 
 app = FastAPI(title="Aidat Blockchain API")
 
@@ -225,39 +217,31 @@ async def create_due(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_admin)
 ):
-    # Smart contract var mı kontrol et
     contract = db.query(models.SmartContract).filter(models.SmartContract.contract_id == due.contract_id).first()
     if not contract:
         raise HTTPException(
             status_code=404,
             detail=f"Smart contract bulunamadı: {due.contract_id}"
         )
-
-    # Aidatı oluştur
     db_due = models.Due(
         owner_id=due.owner_id,
         amount=due.amount,
         description=due.description,
         due_date=due.due_date,
-        smart_contract_id=contract.id  # contract.id kullan, contract_id değil
+        smart_contract_id=contract.id
     )
     db.add(db_due)
     db.commit()
     db.refresh(db_due)
-
     # Aidat oluşturma işlemini blockchain'e kaydet
-    due_tx = {
-        "type": "due_creation",
-        "owner_id": db_due.owner_id,
-        "amount": db_due.amount,
-        "description": db_due.description,
-        "due_date": db_due.due_date.isoformat(),
-        "contract_id": due.contract_id,
-        "timestamp": time.time()
-    }
-    blockchain.add_transaction(due_tx)
-    blockchain.mine_pending_transactions("admin")
-
+    blockchain_manager = BlockchainManager(db)
+    blockchain_manager.create_transaction(
+        user_id=current_user.id,
+        transaction_type="DUE_CREATION",
+        amount=due.amount,
+        description=f"Aidat oluşturuldu: {due.description}",
+        due_id=db_due.id
+    )
     return db_due
 
 @app.get("/dues/", response_model=List[schemas.Due])
@@ -295,24 +279,20 @@ async def pay_due(
 
 # Smart Contract işlemleri
 @app.post("/smart-contracts/", response_model=schemas.SmartContract)
-def create_smart_contract(contract: schemas.SmartContractCreate, db: Session = Depends(get_db)):
-    # Benzersiz contract_id oluştur
+def create_smart_contract(
+    contract: schemas.SmartContractCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_admin)
+):
     contract_id = f"SC-{uuid.uuid4().hex[:8].upper()}"
-    
-    # Create blockchain transaction for contract creation
-    contract_tx = {
-        "type": "contract_creation",
-        "contract_id": contract_id,
-        "title": contract.title,
-        "description": contract.description,
-        "timestamp": time.time()
-    }
-    blockchain.add_transaction(contract_tx)
-    
-    # Mine the block to add the contract to blockchain
-    blockchain.mine_pending_transactions("admin")
-    
-    # Create contract in database
+    blockchain_manager = BlockchainManager(db)
+    blockchain_manager.create_transaction(
+        user_id=current_user.id,
+        transaction_type="CONTRACT_CREATION",
+        amount=0,
+        description=f"Akıllı kontrat oluşturuldu: {contract.title}",
+        due_id=None
+    )
     db_contract = models.SmartContract(
         contract_id=contract_id,
         title=contract.title,
@@ -340,18 +320,14 @@ def delete_smart_contract(contract_id: str, db: Session = Depends(get_db)):
     contract = db.query(models.SmartContract).filter(models.SmartContract.contract_id == contract_id).first()
     if contract is None:
         raise HTTPException(status_code=404, detail="Smart contract not found")
-    
-    # Create blockchain transaction for contract deletion
-    deletion_tx = {
-        "type": "contract_deletion",
-        "contract_id": contract_id,
-        "timestamp": time.time()
-    }
-    blockchain.add_transaction(deletion_tx)
-    
-    # Mine the block to add the deletion to blockchain
-    blockchain.mine_pending_transactions("admin")
-    
+    blockchain_manager = BlockchainManager(db)
+    blockchain_manager.create_transaction(
+        user_id=None,
+        transaction_type="CONTRACT_DELETION",
+        amount=0,
+        description=f"Akıllı kontrat silindi: {contract_id}",
+        due_id=None
+    )
     db.delete(contract)
     db.commit()
     return {"message": "Smart contract deleted successfully"}
@@ -398,20 +374,23 @@ def get_blockchain_status():
         "is_valid": blockchain.is_chain_valid()
     }
 
-@app.get("/blockchain/blocks/{index}")
-def get_block(index: int):
-    block = blockchain.get_block_by_index(index)
-    if block is None:
+@app.get("/blockchain/blocks/{index}", response_model=schemas.Block)
+def get_block(index: int, db: Session = Depends(get_db)):
+    blockchain_manager = BlockchainManager(db)
+    blocks = blockchain_manager.get_blockchain()
+    if index < 0 or index >= len(blocks):
         raise HTTPException(status_code=404, detail="Block not found")
+    block = blocks[index]
     return {
-        "index": block.index,
+        "index": index,
         "timestamp": block.timestamp,
-        "transactions": block.transactions,
+        "data": block.data,
         "previous_hash": block.previous_hash,
-        "hash": block.hash,
-        "nonce": block.nonce
+        "hash": block.hash
     }
 
-@app.get("/blockchain/transactions/{address}")
-def get_transaction_history(address: str):
-    return blockchain.get_transaction_history(address) 
+@app.get("/blockchain/transactions/{user_id}", response_model=List[schemas.Transaction])
+def get_transaction_history(user_id: int, db: Session = Depends(get_db)):
+    blockchain_manager = BlockchainManager(db)
+    transactions = blockchain_manager.get_transaction_history(user_id=user_id)
+    return transactions 

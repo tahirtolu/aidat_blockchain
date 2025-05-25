@@ -26,11 +26,11 @@ class BlockchainManager:
             previous_hash=previous_hash,
             data=json.dumps(data)
         )
-        new_block.hash = new_block.calculate_hash()
-        
         self.db.add(new_block)
         self.db.commit()
-        self.db.refresh(new_block)
+        self.db.refresh(new_block)  # id atanır
+        new_block.hash = new_block.calculate_hash()
+        self.db.commit()
         
         logger.info(f"Yeni blok oluşturuldu: ID={new_block.id}")
         return new_block
